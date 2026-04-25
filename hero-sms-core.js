@@ -880,6 +880,14 @@
       }
     }
 
+    async heroSmsGetPrices(config = this.getConfig()) {
+      const normalizedConfig = this.ensureApiConfig(config);
+      return this.requestPayload('getPrices', {
+        service: normalizedConfig.service,
+        country: normalizedConfig.country,
+      }, normalizedConfig);
+    }
+
     async heroSmsGetNumber(options = {}, config = this.getConfig()) {
       const normalizedConfig = this.ensureConfig(config);
       const payload = await this.requestPayload('getNumberV2', {
@@ -1260,7 +1268,34 @@
         this.emitLog(`Failed to read HeroSMS active activations before acquiring a new number: ${error.message}`, 'warn');
       }
 
-      const acquired = await this.heroSmsGetNumber(options, config);
+      const fetchOptions = { ...options };
+      fetchOptions.maxPrice = 0.7;
+
+      try {
+        const pricesPayload = await this.heroSmsGetPrices(config);
+        const countryPrices = pricesPayload[config.country] || {};
+        const servicePrices = countryPrices[config.service] || {};
+
+        const availableOperators = Object.entries(servicePrices)
+          .map(([operatorName, data]) => ({
+            operator: operatorName,
+            cost: Number(data.cost),
+            count: Number(data.count)
+          }))
+          .filter(op => op.count > 0 && op.cost <= 0.7)
+          .sort((a, b) => a.cost - b.cost);
+
+        if (availableOperators.length > 0) {
+          const lowestPrice = availableOperators[0].cost;
+          const targetOperator = availableOperators.find(op => op.cost > lowestPrice) || availableOperators[0];
+          fetchOptions.operator = targetOperator.operator;
+          this.emitLog(`Selected operator: ${targetOperator.operator} at price ${targetOperator.cost}`);
+        }
+      } catch (error) {
+        this.emitLog(`Failed to fetch prices or calculate tiers: ${error.message}`, 'warn');
+      }
+
+      const acquired = await this.heroSmsGetNumber(fetchOptions, config);
       const now = this.now();
       const activation = this.setCurrentActivation({
         activationId: acquired.activationId,
